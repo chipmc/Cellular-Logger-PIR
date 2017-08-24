@@ -62,7 +62,7 @@
  // Program Variables
  int temperatureF;                    // Global variable so we can monitor via cloud variable
  int resetCount;                      // Counts the number of times the Electron has had a pin reset
- // volatile bool watchdogPet = false; // keeps track of when we have pet the watchdog
+ volatile bool watchdogPet = false; // keeps track of when we have pet the watchdog
  volatile bool doneEnabled = true;    // This enables petting the watchdog
  bool resetPIR = true;
 
@@ -300,7 +300,7 @@
 
  void CheckForBump() // This is where we check to see if an interrupt is set when not asleep or act on a tap that woke the Arduino
  {
-     if (digitalRead(intPin) && resetPIR = 1)    // If int2 goes High, either p/l has changed or there's been a single/double tap
+     if (digitalRead(intPin) && resetPIR)    // If int2 goes High, either p/l has changed or there's been a single/double tap
      {
          Serial.println(F("It is a tap - counting"));
          lastBump = millis();    // Reset last bump timer
@@ -353,12 +353,10 @@
          else if (currentHourlyPeriod != lastHour) {
              LogHourlyEvent();
          }
-         readRegister(MMA8452_ADDRESS,0x22);     // Reads the PULSE_SRC register to reset it
          Serial.println(F("Test Started"));
      }
      else {
          inTest = false;
-         readRegister(MMA8452_ADDRESS,0x22);  // Reads the PULSE_SRC register to reset it
          t = Time.now();
          FRAMwrite16(CURRENTDAILYCOUNTADDR, dailyPersonCount);   // Load Daily Count to memory
          FRAMwrite16(CURRENTHOURLYCOUNTADDR, hourlyPersonCount);  // Load Hourly Count to memory
@@ -614,6 +612,6 @@ void watchdogISR()
   {
     digitalWrite(donePin, HIGH);
     digitalWrite(donePin, LOW);
-    //watchdogPet = true;
+    watchdogPet = true;
   }
 }
