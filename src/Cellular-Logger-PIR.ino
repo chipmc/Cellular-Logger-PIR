@@ -7,10 +7,6 @@
 
  // Set parameters
 
- //Time Period Definitions - used for debugging
- #define HOURLYPERIOD Time.hour(t)   // Normally hour(t) but can use minute(t) for debugging
- #define DAILYPERIOD Time.day(t) // Normally day(t) but can use minute(t) or hour(t) for debugging
-
  //These defines let me change the memory map and configuration without hunting through the whole program
  #define VERSIONNUMBER 7             // Increment this number each time the memory map is changed
  #define WORDSIZE 8                  // For the Word size
@@ -172,7 +168,7 @@
      hourlyPersonCount -= hourlyPersonCountSent;    // Confirmed that count was recevied - clearing
      FRAMwrite16(CURRENTHOURLYCOUNTADDR, hourlyPersonCount);  // Load Hourly Count to memory
      hourlyPersonCountSent = 0;
-   }   
+   }
    if(dailyPersonCountSent && !dataInFlight) {
      hourlyPersonCount -= hourlyPersonCountSent;    // Confirmed that count was recevied - clearing both hourly and daily counts
      FRAMwrite16(CURRENTHOURLYCOUNTADDR, hourlyPersonCount);  // Load Hourly Count to memory
@@ -184,10 +180,10 @@
    if (sensorDetect && inTest) {
      recordCount();
    }
-   if (HOURLYPERIOD != currentHourlyPeriod && hourlyPersonCount) {  // Spring into action each hour on the hour as long as we have counts
+   if ((Time.hour() != currentHourlyPeriod) && hourlyPersonCount) {  // Spring into action each hour on the hour as long as we have counts
      LogHourlyEvent();
    }
-   if (DAILYPERIOD != currentDailyPeriod) {
+   if (Time.day() != currentDailyPeriod) {
      LogDailyEvent();
    }
  }
@@ -219,8 +215,8 @@
      if (startTest) {
          inTest = true;
          t = Time.now();                    // Gets the current time
-         currentHourlyPeriod = HOURLYPERIOD;   // Sets the hour period for when the count starts (see #defines)
-         currentDailyPeriod = DAILYPERIOD;     // And the day  (see #defines)
+         currentHourlyPeriod = Time.hour();   // Sets the hour period for when the count starts (see #defines)
+         currentDailyPeriod = Time.day();     // And the day  (see #defines)
          // Deterimine when the last counts were taken check when starting test to determine if we reload values or start counts over
          time_t unixTime = FRAMread32(CURRENTCOUNTSTIME);
          lastHour = Time.hour(unixTime);
@@ -263,7 +259,7 @@
      {
        hourlyPersonCountSent = hourlyPersonCount; // This is the number that was sent to Ubidots - will be subtracted once we get confirmation
        dataInFlight = true; // set the data in flight flag
-       currentHourlyPeriod = HOURLYPERIOD;  // Change the time period
+       currentHourlyPeriod = Time.hour();  // Change the time period
        Serial.println(F("Hourly Event Sent"));
      }
  }
@@ -283,7 +279,7 @@
      {
        dailyPersonCountSent = dailyPersonCount; // This is the number that was sent to Ubidots - will be subtracted once we get confirmation
        dataInFlight = true; // set the data in flight flag
-       currentDailyPeriod = DAILYPERIOD;  // Change the time period
+       currentDailyPeriod = Time.day();  // Change the time period
        Serial.println(F("Daily Event Sent"));
      }
  }
