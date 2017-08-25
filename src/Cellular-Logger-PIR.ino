@@ -1,8 +1,8 @@
 /*
- * Project Cellular-Logger-MMA8452Q
- * Description: Cellular Connected Data Logger
+ * Project Cellular-Logger-PIR
+ * Description: Cellular Connected Data Logger - Passive InfraRed Sensor
  * Author: Chip McClelland
- * Date:18 May 2017
+ * Date: 25 August 2017
  */
 
  // Set parameters
@@ -38,7 +38,7 @@
  #define HOURLYCOUNTOFFSET 4         // Offsets for the values in the hourly words
  #define HOURLYBATTOFFSET 6          // Where the hourly battery charge is stored
  // Finally, here are the variables I want to change often and pull them all together here
- #define SOFTWARERELEASENUMBER "0.1"
+ #define SOFTWARERELEASENUMBER "0.3"
  #define PARKCLOSES 19
  #define PARKOPENS 7
 
@@ -64,16 +64,18 @@
  int resetCount;                      // Counts the number of times the Electron has had a pin reset
  volatile bool watchdogPet = false; // keeps track of when we have pet the watchdog
  volatile bool doneEnabled = true;    // This enables petting the watchdog
- bool resetPIR = true;
+
+ // PIR Sensor variables
+ volatile bool sensorDetect = false;       // This is the flag that an interrupt is triggered
 
  // FRAM and Unix time variables
  time_t t;
  byte lastHour = 0;                   // For recording the startup values
  byte lastDate = 0;                   // These values make sure we record events if time has lapsed
- unsigned int hourlyPersonCount = 0;  // hourly counter
- unsigned int hourlyPersonCountSent = 0;  // Person count in flight to Ubidots
- unsigned int dailyPersonCount = 0;   //  daily counter
- unsigned int dailyPersonCountSent = 0; // Daily person count in flight to Ubidots
+ int hourlyPersonCount = 0;  // hourly counter
+ int hourlyPersonCountSent = 0;  // Person count in flight to Ubidots
+ int dailyPersonCount = 0;   //  daily counter
+ int dailyPersonCountSent = 0; // Daily person count in flight to Ubidots
  bool dataInFlight = false;           // Tracks if we have sent data but not yet cleared it from counts until we get confirmation
  byte currentHourlyPeriod;            // This is where we will know if the period changed
  byte currentDailyPeriod;             // We will keep daily counts as well as period counts
@@ -85,13 +87,12 @@
  //Menu and Program Variables
  unsigned long lastBump = 0;         // set the time of an event
  boolean ledState = LOW;             // variable used to store the last LED status, to toggle the light
- int menuChoice=0;                   // Menu Selection
- boolean refreshMenu = true;         //  Tells whether to write the menu
  boolean inTest = false;             // Are we in a test or not
  int numberHourlyDataPoints;         // How many hourly counts are there
  int numberDailyDataPoints;          // How many daily counts are there
  const char* releaseNumber = SOFTWARERELEASENUMBER;  // Displays the release on the menu
- String RSSIdescription = "";
+ char Signal[17];                            // Used to communicate Wireless RSSI and Description
+ char* levels[6] = {"Poor", "Low", "Medium", "Good", "Very Good", "Great"};
 
 
  void setup()
@@ -103,23 +104,27 @@
    Serial.println(releaseNumber);
 
    pinMode(donePin,OUTPUT);       // Allows us to pet the watchdog
-   attachInterrupt(wakeUpPin, watchdogISR, RISING);   // The watchdog timer will signal us and we have to respond
-
    pinMode(wakeUpPin,INPUT_PULLDOWN);   // This pin is active HIGH
    pinMode(intPin,INPUT);            // PIR interrupt pinMode
    pinMode(blueLED, OUTPUT);           // declare the Red LED Pin as an output
    pinMode(tmp36Shutdwn,OUTPUT);      // Supports shutting down the TMP-36 to save juice
    digitalWrite(tmp36Shutdwn, HIGH);  // Turns on the temp sensor
 
-   Particle.subscribe("hook-response/hourly", myHandler, MY_DEVICES);      // Subscribe to the integration response event
-   Particle.subscribe("hook-response/daily", myHandler, MY_DEVICES);      // Subscribe to the integration response event
-   Particle.variable("RSSIdesc", RSSIdescription);
+   attachInterrupt(wakeUpPin, watchdogISR, RISING);   // The watchdog timer will signal us and we have to respond
+   attachInterrupt(intPin,sensorISR,RISING);          // Will know when the PIR sensor is triggered
+
+   Particle.subscribe("hook-response/Hourly_Count", UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
+   Particle.subscribe("hook-response/Daily_Count", UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
+   Particle.variable("HourlyCount", hourlyPersonCount);
+   Particle.variable("DailyCount", dailyPersonCount);
+   Particle.variable("Signal", Signal);
    Particle.variable("ResetCount", resetCount);
    Particle.variable("Temperature",temperatureF);
-   Particle.variable("Releaase",releaseNumber);
+   Particle.variable("Release",releaseNumber);
    Particle.variable("stateOfChg", stateOfCharge);
    Particle.function("startStop", startStop);
    Particle.function("resetFRAM", resetFRAM);
+   Particle.function("resetCounts",resetCounts);
    Particle.function("SendNow",sendNow);
 
    if (fram.begin()) {                // you can stick the new i2c addr in here, e.g. begin(0x51);
@@ -157,179 +162,55 @@
   Serial.println(resetCount);
 
   Time.zone(-4);                   // Set time zone to Eastern USA daylight saving time
-  printSignalStrength();           // Test signal strength at startup
+  getSignalStrength();           // Test signal strength at startup
   StartStopTest(1);                // Default action is for the test to be running
 
  }
 
  void loop() {
-   if (refreshMenu) {
-       refreshMenu = 0;
-       Serial.println(F("Remote Trail Counter Program Menu"));
-       Serial.println(F("0 - Display Menu"));
-       Serial.println(F("1 - Display status"));
-       Serial.println(F("2 - Set the time zone"));
-       Serial.println(F("3 - Change the sensitivitiy"));
-       Serial.println(F("4 - Change the debounce"));
-       Serial.println(F("5 - Reset the counter"));
-       Serial.println(F("6 - Reset the memory"));
-       Serial.println(F("7 - Start / stop counting"));
-       Serial.println(F("8 - Dump hourly counts"));
-       Serial.println(F("9 - Last 14 day's counts"));
-       NonBlockingDelay(100);
+   if(hourlyPersonCountSent && !dataInFlight) {   // Cleared here as there could be counts coming in while "in Flight"
+     hourlyPersonCount -= hourlyPersonCountSent;    // Confirmed that count was recevied - clearing
+     FRAMwrite16(CURRENTHOURLYCOUNTADDR, hourlyPersonCount);  // Load Hourly Count to memory
+     hourlyPersonCountSent = 0;
+   }   
+   if(dailyPersonCountSent && !dataInFlight) {
+     hourlyPersonCount -= hourlyPersonCountSent;    // Confirmed that count was recevied - clearing both hourly and daily counts
+     FRAMwrite16(CURRENTHOURLYCOUNTADDR, hourlyPersonCount);  // Load Hourly Count to memory
+     hourlyPersonCountSent = 0;
+     dailyPersonCount -= dailyPersonCountSent;
+     FRAMwrite16(CURRENTDAILYCOUNTADDR,hourlyPersonCount);
+     dailyPersonCountSent = 0;
    }
-   if (Serial.available() >> 0) {      // Only enter if there is serial data in the buffer
-       switch (Serial.read()) {          // Read the buffer
-           case '0':
-               refreshMenu = 1;
-               break;
-           case '1':   // Display Current Status Information
-               Serial.print(F("Current Time:"));
-               t = Time.now();
-               Serial.println(Time.timeStr(t)); // Prints time t - example: Wed May 21 01:08:47 2014  // Give and take the bus are in this function as it gets the current time
-               Serial.print("Reset count: ");
-               Serial.println(FRAMread8(RESETCOUNT));
-               stateOfCharge = int(batteryMonitor.getSoC());
-               Serial.print(F("State of charge: "));
-               Serial.print(stateOfCharge);
-               Serial.println(F("%"));
-               Serial.print(F("Hourly count: "));
-               Serial.println(FRAMread16(CURRENTHOURLYCOUNTADDR));
-               Serial.print(F("Daily count: "));
-               Serial.println(FRAMread16(CURRENTDAILYCOUNTADDR));
-               printSignalStrength();
-               Serial.print("Temperature in case: ");
-               Serial.print(getTemperature(0)); // Returns temp in F
-               Serial.println(" degrees F");
-               Serial.println("Sending to Ubidots via Webhook");
-               SendEvent(1);  // Send as an hourly event
-               break;
-           case '2':     // Set the time zone - to be implemented
-               break;
-           case '3':  // Change the sensitivity
-
-               break;
-           case '4':  // Change the debounce value
-
-               break;
-           case '5':  // Reset the current counters
-               Serial.println(F("Counter Reset!"));
-               FRAMwrite16(CURRENTDAILYCOUNTADDR, 0);   // Reset Daily Count in memory
-               FRAMwrite16(CURRENTHOURLYCOUNTADDR, 0);  // Reset Hourly Count in memory
-               hourlyPersonCount = 0;
-               dailyPersonCount = 0;
-               break;
-           case '6': // Reset FRAM Memory
-               ResetFRAM();
-               break;
-           case '7':  // Start or stop the test
-               if (inTest == 0) {
-                   StartStopTest(1);
-               }
-               else {
-                   StartStopTest(0);
-                   refreshMenu = 1;
-               }
-               break;
-           case '8':   // Dump the hourly data to the monitor
-               numberHourlyDataPoints = FRAMread16(HOURLYPOINTERADDR); // Put this here to reduce FRAM reads
-               Serial.print("Retrieving ");
-               Serial.print(HOURLYCOUNTNUMBER);
-               Serial.println(" hourly counts");
-               Serial.println(F("Hour Ending -   Count  - Battery %"));
-               for (int i=0; i < HOURLYCOUNTNUMBER; i++) { // Will walk through the hourly count memory spots - remember pointer is already incremented
-                   unsigned int address = (HOURLYOFFSET + (numberHourlyDataPoints + i) % HOURLYCOUNTNUMBER)*WORDSIZE;
-                   countTemp = FRAMread16(address+HOURLYCOUNTOFFSET);
-                   if (countTemp > 0) {
-                       time_t unixTime = FRAMread32(address);
-                       Serial.print(Time.timeStr(unixTime));
-                       Serial.print(F(" - "));
-                       Serial.print(countTemp);
-                       Serial.print(F("  -  "));
-                       Serial.print(FRAMread8(address+HOURLYBATTOFFSET));
-                       Serial.println(F("%"));
-                   }
-               }
-               Serial.println(F("Done"));
-               break;
-           case '9':  // Download all the daily counts
-               numberDailyDataPoints = FRAMread8(DAILYPOINTERADDR);        // Put this here to reduce FRAM reads
-               Serial.println(F("Date - Count - Battery %"));
-               for (int i=0; i < DAILYCOUNTNUMBER; i++) {                  // Will walk through the 30 daily count memory spots - remember pointer is already incremented
-                   int address = (DAILYOFFSET + (numberDailyDataPoints + i) % DAILYCOUNTNUMBER)*WORDSIZE;      // Here to improve readabiliy - with Wrapping
-                   countTemp = FRAMread16(address+DAILYCOUNTOFFSET);       // This, again, reduces FRAM reads
-                   if (countTemp > 0) {                                    // Since we will step through all 30 - don't print empty results
-                       Serial.print(FRAMread8(address));
-                       Serial.print(F("/"));
-                       Serial.print(FRAMread8(address+DAILYDATEOFFSET));
-                       Serial.print(F(" - "));
-                       Serial.print(countTemp);
-                       Serial.print(F("  -  "));
-                       Serial.print(FRAMread8(address+DAILYBATTOFFSET));
-                       Serial.println(F("%"));
-                   }
-               }
-               Serial.println(F("Done"));
-               break;
-           default:
-               Serial.println(F("Invalid choice - try again"));
-       }
-       Serial.read();  // Clear the serial buffer
+   if (sensorDetect && inTest) {
+     recordCount();
    }
-   if (inTest == 1) {
-     if(hourlyPersonCountSent && !dataInFlight) {
-       Serial.print("Receipt confirmed so ");
-       Serial.print(hourlyPersonCount);
-       Serial.print(" minus ");
-       Serial.print(hourlyPersonCountSent);
-       Serial.print(" yeilds ");
-       hourlyPersonCount -= hourlyPersonCountSent;    // Confirmed that count was recevied - clearing
-       Serial.println(hourlyPersonCount);
-       hourlyPersonCountSent = 0;
-     }
-     CheckForBump();
+   if (HOURLYPERIOD != currentHourlyPeriod && hourlyPersonCount) {  // Spring into action each hour on the hour as long as we have counts
+     LogHourlyEvent();
    }
-
-   if (watchdogPet)
-   {
-     Serial.println("We have pet the watchdog");
-     watchdogPet = false;
+   if (DAILYPERIOD != currentDailyPeriod) {
+     LogDailyEvent();
    }
-
  }
 
- void CheckForBump() // This is where we check to see if an interrupt is set when not asleep or act on a tap that woke the Arduino
+ void recordCount() // This is where we check to see if an interrupt is set when not asleep or act on a tap that woke the Arduino
  {
-     if (digitalRead(intPin) && resetPIR)    // If int2 goes High, either p/l has changed or there's been a single/double tap
-     {
-         Serial.println(F("It is a tap - counting"));
-         lastBump = millis();    // Reset last bump timer
-         t = Time.now();
-         if (HOURLYPERIOD != currentHourlyPeriod) {
-             LogHourlyEvent();
-         }
-         if (DAILYPERIOD != currentDailyPeriod) {
-             LogDailyEvent();
-         }
-         hourlyPersonCount++;                    // Increment the PersonCount
-         FRAMwrite16(CURRENTHOURLYCOUNTADDR, hourlyPersonCount);  // Load Hourly Count to memory
-         dailyPersonCount++;                    // Increment the PersonCount
-         FRAMwrite16(CURRENTDAILYCOUNTADDR, dailyPersonCount);   // Load Daily Count to memory
-         FRAMwrite32(CURRENTCOUNTSTIME, t);   // Write to FRAM - this is so we know when the last counts were saved
-         Serial.print(F("Hourly: "));
-         Serial.print(hourlyPersonCount);
-         Serial.print(F(" Daily: "));
-         Serial.print(dailyPersonCount);
-         Serial.print(F("  Time: "));
-         Serial.println(Time.timeStr(t)); // Prints time t - example: Wed May 21 01:08:47 2014
-         ledState = !ledState;              // toggle the status of the LEDPIN:
-         digitalWrite(blueLED, ledState);    // update the LED pin itself
-         resetPIR = 0;    // Can't count again until PIR goes low
-     }
-     else if (!digitalRead(intPin))
-     {
-       resetPIR = 1;    // Ensures we wait for PIR to go low before counting again
-     }
+   Serial.println(F("It is a tap - counting"));
+   sensorDetect = false;      // Reset the flag
+   lastBump = millis();    // Reset last bump timer
+   t = Time.now();
+   hourlyPersonCount++;                    // Increment the PersonCount
+   FRAMwrite16(CURRENTHOURLYCOUNTADDR, hourlyPersonCount);  // Load Hourly Count to memory
+   dailyPersonCount++;                    // Increment the PersonCount
+   FRAMwrite16(CURRENTDAILYCOUNTADDR, dailyPersonCount);   // Load Daily Count to memory
+   FRAMwrite32(CURRENTCOUNTSTIME, t);   // Write to FRAM - this is so we know when the last counts were saved
+   Serial.print(F("Hourly: "));
+   Serial.print(hourlyPersonCount);
+   Serial.print(F(" Daily: "));
+   Serial.print(dailyPersonCount);
+   Serial.print(F("  Time: "));
+   Serial.println(Time.timeStr(t)); // Prints time t - example: Wed May 21 01:08:47 2014
+   ledState = !ledState;              // toggle the status of the LEDPIN:
+   digitalWrite(blueLED, ledState);    // update the LED pin itself
  }
 
 
@@ -385,22 +266,6 @@
        currentHourlyPeriod = HOURLYPERIOD;  // Change the time period
        Serial.println(F("Hourly Event Sent"));
      }
-     printSignalStrength();
- }
-
- bool SendEvent(bool hourlyEvent)
- {
-   // Take the temperature and report to Ubidots - may set up custom webhooks later
-   digitalWrite(donePin, HIGH);
-   digitalWrite(donePin,LOW);     // Pet the dog so we have a full period for a response
-   doneEnabled = false;           // Can't pet the dog unless we get a confirmation via Webhook Response and the right Ubidots code.
-   // Serial.println("Watchdog petting disabled");
-   int currentTemp = getTemperature(0);  // 0 argument for degrees F
-   stateOfCharge = int(batteryMonitor.getSoC());
-   String data = String::format("{\"hourly\":%i, \"daily\":%i,\"battery\":%i, \"temp\":%i}",hourlyPersonCount, dailyPersonCount, stateOfCharge, currentTemp);
-   if (hourlyEvent) Particle.publish("hourly", data, PRIVATE);
-   else Particle.publish("daily", data, PRIVATE);
-   return 1;
  }
 
  void LogDailyEvent() // Log Daily Event()
@@ -416,10 +281,45 @@
      FRAMwrite8(DAILYPOINTERADDR,newDailyPointerAddr);
      if (SendEvent(0))
      {
-       dailyPersonCount = 0;    // Reset and increment the Person Count in the new period
+       dailyPersonCountSent = dailyPersonCount; // This is the number that was sent to Ubidots - will be subtracted once we get confirmation
+       dataInFlight = true; // set the data in flight flag
        currentDailyPeriod = DAILYPERIOD;  // Change the time period
        Serial.println(F("Daily Event Sent"));
      }
+ }
+
+ bool SendEvent(bool hourlyEvent)
+ {
+   // Take the temperature and report to Ubidots - may set up custom webhooks later
+   digitalWrite(donePin, HIGH);
+   digitalWrite(donePin,LOW);     // Pet the dog so we have a full period for a response
+   doneEnabled = false;           // Can't pet the dog unless we get a confirmation via Webhook Response and the right Ubidots code.
+   int currentTemp = getTemperature(0);  // 0 argument for degrees F
+   char data[256];                                         // Store the date in this character array - not global
+   snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i,\"battery\":%i, \"temp\":%i}",hourlyPersonCount, dailyPersonCount, stateOfCharge, currentTemp);
+   if (hourlyEvent) Particle.publish("Hourly_Count", data, PRIVATE);
+   else Particle.publish("Daily_Count", data, PRIVATE);
+   return 1;
+ }
+
+ void UbidotsHandler(const char *event, const char *data)  // Looks at the response from Ubidots - Will reset Photon if no successful response
+ {
+   // Response Template: "{{hourly.0.status_code}}"
+   if (!data) {                                            // First check to see if there is any data
+     Particle.publish("UbidotsResp", "No Data");
+     return;
+   }
+   int responseCode = atoi(data);                          // Response is only a single number thanks to Template
+   if ((responseCode == 200) || (responseCode == 201))
+   {
+     Particle.publish("UbidotsHook","Success");
+     Serial.println("Request successfully completed");
+     dataInFlight = false;                                 // Data has been received
+     doneEnabled = true;                                   // Successful response - can pet the dog again
+     digitalWrite(donePin, HIGH);                          // If an interrupt came in while petting disabled, we missed it so...
+     digitalWrite(donePin, LOW);                           // will pet the dog just to be safe
+   }
+   else Particle.publish("UbidotsHook", data);             // Publish the response code
  }
 
 void NonBlockingDelay(int millisDelay)  // Used for a non-blocking delay
@@ -442,111 +342,22 @@ void BlinkForever() // When something goes badly wrong...
     }
 }
 
-void myHandler(const char *event, const char *data)
+void getSignalStrength()
 {
-  if (!data) {              // First check to see if there is any data
-    Serial.print("No data returned from WebHook ");
-    Serial.println(event);
-    return;
-  }
-  Serial.print(event);
-  Serial.print(" returned ");
-  Serial.println(data);
-  String response = data;   // If there is data - copy it into a String variable
-  int datainResponse = response.indexOf("hourly") + 24; // Find the "hourly" field and add 24 to get to the value
-  String responseCodeString = response.substring(datainResponse,datainResponse+3);  // Trim all but the value
-  int responseCode = responseCodeString.toInt();  // Put this into an int for comparisons
-  switch (responseCode) {   // From the Ubidots API refernce https://ubidots.com/docs/api/#response-codes
-    case 200:
-      Serial.println("Request successfully completed");
-      doneEnabled = true;   // Successful response - can pet the dog again
-      digitalWrite(donePin, HIGH);  // If an interrupt came in while petting disabled, we missed it so...
-      digitalWrite(donePin, LOW);   // will pet the fdog just to be safe
-      break;
-    case 201:
-      Serial.println("Successful request - new data point created");
-      dataInFlight = false;  // clear the data in flight flag
-      doneEnabled = true;   // Successful response - can pet the dog again
-      digitalWrite(donePin, HIGH);  // If an interrupt came in while petting disabled, we missed it so...
-      digitalWrite(donePin, LOW);   // will pet the fdog just to be safe
-      break;
-    case 400:
-      Serial.println("Bad request - check JSON body");
-      break;
-    case 403:
-      Serial.println("Forbidden token not valid");
-      break;
-    case 404:
-      Serial.println("Not found - verify variable and device ID");
-      break;
-    case 405:
-      Serial.println("Method not allowed for API endpoint chosen");
-      break;
-    case 501:
-      Serial.println("Internal error");
-      break;
-    default:
-      Serial.print("Ubidots Response Code: ");    // Non-listed code - generic response
-      Serial.println(responseCode);
-      break;
-  }
-
-}
-
-void printSignalStrength()
-{
-  CellularSignal sig = Cellular.RSSI();  // Prototype for Cellular Signal Montoring
-  int rssi = sig.rssi;
-  int strength = map(rssi, -131, -51, 0, 5);
-  Serial.print("The signal strength is: ");
-  switch (strength)
-  {
-    case 0:
-      RSSIdescription = "Poor Signal";
-      break;
-    case 1:
-      RSSIdescription = "Low Signal";
-      break;
-    case 2:
-      RSSIdescription = "Medium Signal";
-      break;
-    case 3:
-      RSSIdescription = "Good Signal";
-      break;
-    case 4:
-      RSSIdescription = "Very Good Signal";
-      break;
-    case 5:
-      RSSIdescription = "Great Signal";
-      break;
-  }
-  Serial.println(RSSIdescription);
-}
-
-int resetCounts(String command)   // Will reset the local counts
-{
-  if (command == "reset")
-  {
-    Serial.println(F("Counter Reset!"));
-    FRAMwrite16(CURRENTDAILYCOUNTADDR, 0);   // Reset Daily Count in memory
-    FRAMwrite16(CURRENTHOURLYCOUNTADDR, 0);  // Reset Hourly Count in memory
-    hourlyPersonCount = 0;
-    hourlyPersonCountSent = 0;                // In the off-chance there is data in flight
-    dataInFlight = false;
-    dailyPersonCount = 0;
-    return 1;
-  }
-  else return 0;
+    CellularSignal sig = Cellular.RSSI();  // Prototype for Cellular Signal Montoring
+    int rssi = sig.rssi;
+    int strength = map(rssi, -131, -51, 0, 5);
+    sprintf(Signal, "%s: %d", levels[strength], rssi);
 }
 
 int startStop(String command)   // Will reset the local counts
 {
-  if (command == "start" && !inTest)
+  if (command == "1" && !inTest)
   {
     StartStopTest(1);
     return 1;
   }
-  else if (command == "stop" && inTest)
+  else if (command == "0" && inTest)
   {
     StartStopTest(0);
     return 1;
@@ -561,7 +372,7 @@ int startStop(String command)   // Will reset the local counts
 
 int resetFRAM(String command)   // Will reset the local counts
 {
-  if (command == "reset")
+  if (command == "1")
   {
     ResetFRAM();
     return 1;
@@ -569,12 +380,26 @@ int resetFRAM(String command)   // Will reset the local counts
   else return 0;
 }
 
-
+int resetCounts(String command)   // Resets the current hourly and daily counts
+{
+  if (command == "1")
+  {
+    FRAMwrite16(CURRENTDAILYCOUNTADDR, 0);   // Reset Daily Count in memory
+    FRAMwrite16(CURRENTHOURLYCOUNTADDR, 0);  // Reset Hourly Count in memory
+    hourlyPersonCount = 0;                    // Reset count variables
+    dailyPersonCount = 0;
+    hourlyPersonCountSent = 0;                // In the off-chance there is data in flight
+    dataInFlight = false;
+    return 1;
+  }
+  else return 0;
+}
 
 int sendNow(String command) // Function to force sending data in current hour
 {
-  if (command == "send")
+  if (command == "1")
   {
+    getSignalStrength();
     LogHourlyEvent();
     return 1;
   }
@@ -614,4 +439,9 @@ void watchdogISR()
     digitalWrite(donePin, LOW);
     watchdogPet = true;
   }
+}
+
+void sensorISR()
+{
+  sensorDetect = true;  // sets the sensor flag for the main loop
 }
