@@ -34,7 +34,7 @@
  #define HOURLYCOUNTOFFSET 4         // Offsets for the values in the hourly words
  #define HOURLYBATTOFFSET 6          // Where the hourly battery charge is stored
  // Finally, here are the variables I want to change often and pull them all together here
- #define SOFTWARERELEASENUMBER "0.3"
+ #define SOFTWARERELEASENUMBER "0.4"
  #define PARKCLOSES 19
  #define PARKOPENS 7
 
@@ -58,7 +58,6 @@
  // Program Variables
  int temperatureF;                    // Global variable so we can monitor via cloud variable
  int resetCount;                      // Counts the number of times the Electron has had a pin reset
- volatile bool watchdogPet = false; // keeps track of when we have pet the watchdog
  volatile bool doneEnabled = true;    // This enables petting the watchdog
 
  // PIR Sensor variables
@@ -108,9 +107,13 @@
 
    attachInterrupt(wakeUpPin, watchdogISR, RISING);   // The watchdog timer will signal us and we have to respond
    attachInterrupt(intPin,sensorISR,RISING);          // Will know when the PIR sensor is triggered
+   char responseTopic[125];
+   String deviceID = System.deviceID();
+   deviceID.toCharArray(responseTopic,125);
+   Particle.subscribe(responseTopic, UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
+   //Particle.subscribe("hook-response/Hourly_Count", UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
+   //Particle.subscribe("hook-response/Daily_Count", UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
 
-   Particle.subscribe("hook-response/Hourly_Count", UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
-   Particle.subscribe("hook-response/Daily_Count", UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
    Particle.variable("HourlyCount", hourlyPersonCount);
    Particle.variable("DailyCount", dailyPersonCount);
    Particle.variable("Signal", Signal);
@@ -118,6 +121,7 @@
    Particle.variable("Temperature",temperatureF);
    Particle.variable("Release",releaseNumber);
    Particle.variable("stateOfChg", stateOfCharge);
+
    Particle.function("startStop", startStop);
    Particle.function("resetFRAM", resetFRAM);
    Particle.function("resetCounts",resetCounts);
@@ -298,25 +302,25 @@
    return 1;
  }
 
- void UbidotsHandler(const char *event, const char *data)  // Looks at the response from Ubidots - Will reset Photon if no successful response
- {
-   // Response Template: "{{hourly.0.status_code}}"
-   if (!data) {                                            // First check to see if there is any data
-     Particle.publish("UbidotsResp", "No Data");
-     return;
-   }
-   int responseCode = atoi(data);                          // Response is only a single number thanks to Template
-   if ((responseCode == 200) || (responseCode == 201))
-   {
-     Particle.publish("UbidotsHook","Success");
-     Serial.println("Request successfully completed");
-     dataInFlight = false;                                 // Data has been received
-     doneEnabled = true;                                   // Successful response - can pet the dog again
-     digitalWrite(donePin, HIGH);                          // If an interrupt came in while petting disabled, we missed it so...
-     digitalWrite(donePin, LOW);                           // will pet the dog just to be safe
-   }
-   else Particle.publish("UbidotsHook", data);             // Publish the response code
- }
+void UbidotsHandler(const char *event, const char *data)  // Looks at the response from Ubidots - Will reset Photon if no successful response
+{
+  // Response Template: "{{hourly.0.status_code}}"
+  if (!data) {                                            // First check to see if there is any data
+    Particle.publish("UbidotsResp", "No Data");
+    return;
+  }
+  int responseCode = atoi(data);                          // Response is only a single number thanks to Template
+  if ((responseCode == 200) || (responseCode == 201))
+  {
+    Particle.publish("UbidotsHook","Success");
+    Serial.println("Request successfully completed");
+    dataInFlight = false;                                 // Data has been received
+    doneEnabled = true;                                   // Successful response - can pet the dog again
+    digitalWrite(donePin, HIGH);                          // If an interrupt came in while petting disabled, we missed it so...
+    digitalWrite(donePin, LOW);                           // will pet the dog just to be safe
+  }
+  else Particle.publish("UbidotsHook", data);             // Publish the response code
+}
 
 void NonBlockingDelay(int millisDelay)  // Used for a non-blocking delay
 {
@@ -433,7 +437,6 @@ void watchdogISR()
   {
     digitalWrite(donePin, HIGH);
     digitalWrite(donePin, LOW);
-    watchdogPet = true;
   }
 }
 
